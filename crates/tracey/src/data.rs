@@ -70,6 +70,9 @@ pub struct DashboardData {
     /// `SpecConfig.syntax` override by spec name, when a spec's format can't
     /// be inferred from extension alone (e.g. `asciidoc` vs `asciidoc-roles`).
     pub syntax_override_by_spec: BTreeMap<String, Option<String>>,
+    /// `SpecConfig.git_ref` by spec name, when a spec is pinned to a git ref
+    /// instead of the live working tree.
+    pub git_ref_by_spec: BTreeMap<String, Option<String>>,
     /// Source files for full-text index construction
     pub search_files: BTreeMap<PathBuf, String>,
     /// Parsed requirement references and warnings by source file, captured during rebuild.
@@ -776,6 +779,59 @@ fn resolve_spec_format(path: &Path, syntax_override: Option<&str>) -> Result<Spe
     Ok(SpecFormat::from_path(path).unwrap_or(SpecFormat::Markdown))
 }
 
+/// Read a spec file's content, either from the working tree (honoring the
+/// LSP overlay and mtime fast-path) or, when `git_ref` is set, from that
+/// pinned git ref via `git cat-file blob`. Git-ref content has no mtime to
+/// fast-path on, so callers must key their cache on content hash alone for
+/// this path.
+async fn read_spec_source(
+    project_root: &Path,
+    path: &Path,
+    canonical: &Path,
+    overlay: &FileOverlay,
+    git_ref: Option<&str>,
+) -> Result<(String, u64, Option<u128>, bool)> {
+    if let Some(git_ref) = git_ref {
+        let canon_root = project_root
+            .canonicalize()
+            .unwrap_or_else(|_| project_root.to_path_buf());
+        let rel_str = if let Ok(rel) = canonical.strip_prefix(&canon_root) {
+            rel.to_string_lossy().replace('\\', "/")
+        } else {
+            compute_relative_path(&canon_root, canonical)
+        };
+        let content = crate::bump::git_cat_file(project_root, git_ref, &rel_str)?.ok_or_else(|| {
+            eyre::eyre!("git ref \"{git_ref}\" has no file \"{rel_str}\" for spec source")
+        })?;
+        let file_len = content.len() as u64;
+        return Ok((content, file_len, None, false));
+    }
+
+    let overlay_content = overlay
+        .get(path)
+        .or_else(|| overlay.get(canonical))
+        .cloned();
+    let overlay_is_present = overlay_content.is_some();
+
+    let (content, file_len, modified_nanos) = if let Some(content) = overlay_content {
+        (content.clone(), content.len() as u64, None)
+    } else {
+        let metadata = tokio::fs::metadata(canonical).await.ok();
+        let file_len = metadata.as_ref().map_or(0, std::fs::Metadata::len);
+        let modified_nanos = metadata
+            .as_ref()
+            .and_then(|m| m.modified().ok())
+            .and_then(file_modified_nanos);
+        (
+            read_file_with_overlay(canonical, overlay).await?,
+            file_len,
+            modified_nanos,
+        )
+    };
+    Ok((content, file_len, modified_nanos, overlay_is_present))
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn extract_spec_rules_cached(
     project_root: &Path,
     path: &Path,
@@ -784,33 +840,18 @@ async fn extract_spec_rules_cached(
     quiet: bool,
     stats: &mut CacheStats,
     syntax_override: Option<&str>,
+    git_ref: Option<&str>,
 ) -> Result<Vec<crate::ExtractedRule>> {
     let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let overlay_content = overlay
-        .get(path)
-        .or_else(|| overlay.get(&canonical))
-        .cloned();
-    let overlay_is_present = overlay_content.is_some();
-
-    let (content, file_len, modified_nanos) = if let Some(content) = overlay_content {
-        (content.clone(), content.len() as u64, None)
-    } else {
-        let metadata = tokio::fs::metadata(&canonical).await.ok();
-        let file_len = metadata.as_ref().map_or(0, std::fs::Metadata::len);
-        let modified_nanos = metadata
-            .as_ref()
-            .and_then(|m| m.modified().ok())
-            .and_then(file_modified_nanos);
-        (
-            read_file_with_overlay(&canonical, overlay).await?,
-            file_len,
-            modified_nanos,
-        )
-    };
+    let (content, file_len, modified_nanos, overlay_is_present) =
+        read_spec_source(project_root, path, &canonical, overlay, git_ref).await?;
+    // Git-ref specs have no mtime to fast-path on; always fall through to the
+    // content-hash comparison below.
+    let skip_metadata_fastpath = overlay_is_present || git_ref.is_some();
 
     let content_hash = compute_content_hash(&content);
     if let Some(entry) = cache.spec_files.get(&canonical) {
-        if !overlay_is_present
+        if !skip_metadata_fastpath
             && entry.file_len == file_len
             && entry.modified_nanos == modified_nanos
         {
@@ -876,6 +917,7 @@ async fn load_rules_from_includes_cached(
     changed_files: &[PathBuf],
     stats: &mut CacheStats,
     syntax_override: Option<&str>,
+    git_ref: Option<&str>,
 ) -> Result<(Vec<crate::ExtractedRule>, Vec<PathBuf>, bool)> {
     let (mut spec_paths, _warnings, did_full_walk) =
         get_cached_spec_scan_paths(project_root, include_patterns, changed_files, cache);
@@ -893,9 +935,17 @@ async fn load_rules_from_includes_cached(
     let mut seen_ids: BTreeSet<String> = BTreeSet::new();
     let collected_paths: Vec<PathBuf> = spec_paths.into_iter().collect();
     for path in &collected_paths {
-        let extracted =
-            extract_spec_rules_cached(project_root, path, overlay, cache, quiet, stats, syntax_override)
-                .await?;
+        let extracted = extract_spec_rules_cached(
+            project_root,
+            path,
+            overlay,
+            cache,
+            quiet,
+            stats,
+            syntax_override,
+            git_ref,
+        )
+        .await?;
         for rule in extracted {
             let id = rule.def.id.to_string();
             if seen_ids.contains(&id) {
@@ -2199,6 +2249,7 @@ pub async fn build_dashboard_data_with_overlay_and_cache(
     let mut spec_includes_by_name: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut format_config_by_spec: BTreeMap<String, FormatConfig> = BTreeMap::new();
     let mut syntax_override_by_spec: BTreeMap<String, Option<String>> = BTreeMap::new();
+    let mut git_ref_by_spec: BTreeMap<String, Option<String>> = BTreeMap::new();
     let mut all_file_contents: BTreeMap<PathBuf, String> = BTreeMap::new();
     let mut all_spec_file_contents: BTreeMap<PathBuf, String> = BTreeMap::new();
     let mut all_spec_file_syntax: BTreeMap<PathBuf, Option<String>> = BTreeMap::new();
@@ -2318,6 +2369,7 @@ pub async fn build_dashboard_data_with_overlay_and_cache(
                 changed_files,
                 &mut cache_stats,
                 spec_config.syntax.as_deref(),
+                spec_config.git_ref.as_deref(),
             )
             .await?;
         total_extracted_rules += extracted_rules.len();
@@ -2374,6 +2426,7 @@ pub async fn build_dashboard_data_with_overlay_and_cache(
         spec_includes_by_name.insert(spec_name.clone(), include_patterns.clone());
         format_config_by_spec.insert(spec_name.clone(), spec_config.format.clone());
         syntax_override_by_spec.insert(spec_name.clone(), spec_config.syntax.clone());
+        git_ref_by_spec.insert(spec_name.clone(), spec_config.git_ref.clone());
 
         // Build data for each implementation
         struct ImplComputeTaskMeta {
@@ -2649,6 +2702,7 @@ pub async fn build_dashboard_data_with_overlay_and_cache(
         spec_includes_by_name,
         format_config_by_spec,
         syntax_override_by_spec,
+        git_ref_by_spec,
         search_files: all_file_contents,
         source_reqs_by_file: all_source_reqs_by_file,
         search_rules: all_search_rules,
@@ -2699,6 +2753,7 @@ async fn load_spec_content(
     overlay: &FileOverlay,
     spec_file_deps: &mut std::collections::HashSet<PathBuf>,
     syntax_override: Option<&str>,
+    git_ref: Option<&str>,
 ) -> Result<()> {
     use ignore::WalkBuilder;
 
@@ -2764,7 +2819,7 @@ async fn load_spec_content(
             continue;
         };
 
-        if let Ok(content) = read_file_with_overlay(path, overlay).await {
+        if let Ok((content, _, _, _)) = read_spec_source(root, path, path, overlay, git_ref).await {
             // Parse frontmatter / metadata to get weight
             let weight = parse_weight(fmt, &content);
             files.push((relative.to_string_lossy().to_string(), content, weight, fmt));
@@ -2890,6 +2945,7 @@ pub async fn render_spec_content_for_impl(
     forward: &ApiSpecForward,
     deps: &mut std::collections::HashSet<PathBuf>,
     syntax_override: Option<&str>,
+    git_ref: Option<&str>,
 ) -> Result<ApiSpecData> {
     let mut coverage: BTreeMap<String, RuleCoverage> = BTreeMap::new();
     for rule in &forward.rules {
@@ -2930,6 +2986,7 @@ pub async fn render_spec_content_for_impl(
         &FileOverlay::new(),
         &mut abs_deps,
         syntax_override,
+        git_ref,
     )
     .await;
     // Relativize deps into the out-param BEFORE propagating any error: a

@@ -78,7 +78,7 @@ async fn markdown_only_outline_slugs_unchanged() {
         name: "test".to_string(),
         rules: vec![],
     };
-    let spec = render_spec_content_for_impl(&root, &["spec.md".to_string()], "test", "rust", &Default::default(), &forward, &mut Default::default(), None)
+    let spec = render_spec_content_for_impl(&root, &["spec.md".to_string()], "test", "rust", &Default::default(), &forward, &mut Default::default(), None, None)
         .await
         .expect("render failed");
 
@@ -126,6 +126,7 @@ async fn markdown_heading_under_r_avoids_req_anchor_namespace() {
         &Default::default(),
         &forward,
         &mut Default::default(),
+        None,
         None,
     )
     .await
@@ -179,7 +180,7 @@ async fn renders_html_with_badges() {
     };
     let mut deps = std::collections::HashSet::new();
     let spec =
-        render_spec_content_for_impl(&root, &["spec.typ".to_string()], "test", "rust", &Default::default(), &forward, &mut deps, None)
+        render_spec_content_for_impl(&root, &["spec.typ".to_string()], "test", "rust", &Default::default(), &forward, &mut deps, None, None)
             .await
             .expect("typst render failed");
 
@@ -254,6 +255,7 @@ async fn deps_reported_when_render_fails() {
         &Default::default(),
         &forward,
         &mut deps,
+        None,
         None,
     )
     .await
@@ -344,6 +346,7 @@ async fn mixed_format_spec() {
         &forward,
         &mut Default::default(),
         None,
+        None,
     )
     .await
     .expect("render failed");
@@ -397,6 +400,7 @@ async fn markdown_reslug_forward_cursor_avoids_swap() {
         &Default::default(),
         &forward,
         &mut Default::default(),
+        None,
         None,
     )
     .await
@@ -455,6 +459,7 @@ async fn markdown_reslug_handles_intra_run_duplicates() {
         &forward,
         &mut Default::default(),
         None,
+        None,
     )
     .await
     .expect("render failed");
@@ -508,6 +513,7 @@ async fn mixed_format_outline_dedups_heading_slugs() {
         &Default::default(),
         &forward,
         &mut Default::default(),
+        None,
         None,
     )
     .await

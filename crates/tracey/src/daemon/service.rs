@@ -671,6 +671,7 @@ impl TraceyDaemon for TraceyService {
         let include_patterns = data.spec_includes_by_name.get(&spec)?;
         let format = data.format_config_by_spec.get(&spec)?;
         let syntax_override = data.syntax_override_by_spec.get(&spec).cloned().flatten();
+        let git_ref = data.git_ref_by_spec.get(&spec).cloned().flatten();
         let mut deps = std::collections::HashSet::new();
         let result = crate::data::render_spec_content_for_impl(
             self.inner.engine.project_root(),
@@ -681,6 +682,7 @@ impl TraceyDaemon for TraceyService {
             forward,
             &mut deps,
             syntax_override.as_deref(),
+            git_ref.as_deref(),
         )
         .await;
         // Surface transitive typst `#import` deps to the watcher regardless of
