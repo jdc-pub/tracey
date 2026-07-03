@@ -12,6 +12,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 mod asciidoc;
+mod asciidoc_roles;
 mod markdown;
 mod registry;
 mod sdoc;
@@ -44,6 +45,56 @@ pub fn req_anchor_id(id: &str) -> String {
 /// requirement anchor.
 pub fn req_anchor_to_id(anchor: &str) -> Option<&str> {
     anchor.strip_prefix(REQ_ANCHOR_PREFIX)
+}
+
+/// Convert a byte offset into a 1-indexed line number. Shared by the
+/// asciidork-based backends (`asciidoc`, `asciidoc_roles`).
+pub(crate) fn byte_offset_to_line(source: &str, offset: usize) -> usize {
+    source[..offset.min(source.len())].matches('\n').count() + 1
+}
+
+/// Extract the sort weight from AsciiDoc frontmatter / `:weight:` document
+/// attribute. Shared by the asciidork-based backends (`asciidoc`,
+/// `asciidoc_roles`), which use identical document-level weight conventions
+/// regardless of requirement-marker syntax.
+pub(crate) fn adoc_parse_weight(content: &str) -> i32 {
+    // YAML/TOML frontmatter first
+    if let Ok((fm, _)) = marq::parse_frontmatter(content)
+        && fm.weight != 0
+    {
+        return fm.weight;
+    }
+    // AsciiDoc `:weight: N` document attribute (line scan, pre-title only)
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('=') {
+            break;
+        }
+        if let Some(w) = line
+            .strip_prefix(":weight:")
+            .and_then(|r| r.trim().parse::<i32>().ok())
+        {
+            return w;
+        }
+    }
+    0
+}
+
+/// Minimal HTML-escape for text embedded in generated markup. Shared by the
+/// asciidork-based backends (`asciidoc`, `asciidoc_roles`).
+pub(crate) fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// Allocates globally-unique heading slugs across a multi-file spec.
@@ -110,6 +161,8 @@ pub enum SpecFormat {
     Sdoc,
     /// AsciiDoc with `r[id]` marker syntax, parsed via `asciidork`.
     AsciiDoc,
+    /// AsciiDoc with native `[role="requirement", id="..."]` open blocks.
+    AsciiDocRoles,
 }
 
 impl SpecFormat {

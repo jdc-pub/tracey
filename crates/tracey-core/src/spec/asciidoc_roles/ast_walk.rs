@@ -1,16 +1,15 @@
-//! AST walk for asciidork documents: extract requirements, headings, inline code spans.
+//! AST walk for the `AsciiDocRoles` backend: extract `[role="requirement", ...]`
+//! open blocks, headings, and inline code spans.
 
 use std::collections::HashSet;
 
 use asciidork_ast::{
-    AttrValue, Block, BlockContent, BlockContext, DocContent, Document, Inline, InlineNodes,
-    ReadAttr, Section,
+    AttrData, AttrValue, Block, BlockContent, BlockContext, DocContent, Document, Inline,
+    InlineNodes, ReadAttr, Section,
 };
-use marq::{
-    DocElement, Heading, InlineCodeSpan, Paragraph, ReqDefinition, ReqMetadata, SourceSpan,
-};
+use marq::{DocElement, Heading, InlineCodeSpan, Paragraph, ReqDefinition, ReqMetadata, SourceSpan};
 
-use crate::spec::{SlugAllocator, byte_offset_to_line, html_escape, req_anchor_id};
+use crate::spec::{SlugAllocator, byte_offset_to_line, req_anchor_id};
 
 /// Result of walking the asciidork AST.
 pub struct WalkResult {
@@ -117,12 +116,20 @@ fn walk_block<'arena>(
     result: &mut WalkResult,
     seen_bases: &mut HashSet<String>,
 ) -> eyre::Result<()> {
+    if block.context == BlockContext::Open && block.meta.attrs.has_role("requirement") {
+        extract_req_block(block, source, result, seen_bases)?;
+        return Ok(());
+    }
+
     match &block.content {
-        BlockContent::Simple(inlines) if block.context == BlockContext::Paragraph => {
-            walk_paragraph(inlines, source, result, seen_bases)?;
-        }
         BlockContent::Simple(inlines) => {
             collect_spans_from_inlines(inlines, &mut result.inline_code_spans);
+            let line = inlines
+                .first()
+                .map_or(0, |first| byte_offset_to_line(source, first.loc.start as usize));
+            result
+                .elements
+                .push(DocElement::Paragraph(Paragraph { line, offset: 0 }));
         }
         BlockContent::Section(section) => {
             walk_section(section, source, alloc, result, seen_bases)?;
@@ -138,80 +145,73 @@ fn walk_block<'arena>(
     Ok(())
 }
 
-fn walk_paragraph<'arena>(
-    inlines: &InlineNodes<'arena>,
+fn extract_req_block<'arena>(
+    block: &Block<'arena>,
     source: &str,
     result: &mut WalkResult,
     seen_bases: &mut HashSet<String>,
 ) -> eyre::Result<()> {
-    collect_spans_from_inlines(inlines, &mut result.inline_code_spans);
+    let attrs = &block.meta.attrs;
 
-    let Some(first) = inlines.first() else {
-        result
-            .elements
-            .push(DocElement::Paragraph(Paragraph { line: 0, offset: 0 }));
-        return Ok(());
-    };
-
-    let first_text = match &first.content {
-        Inline::Text(s) => s.as_str(),
-        _ => {
-            let line = byte_offset_to_line(source, first.loc.start as usize);
-            result
-                .elements
-                .push(DocElement::Paragraph(Paragraph { line, offset: 0 }));
-            return Ok(());
-        }
-    };
-
-    let Some((_, id_str, marker_end)) = parse_req_leading_marker(first_text) else {
-        let line = byte_offset_to_line(source, first.loc.start as usize);
-        result
-            .elements
-            .push(DocElement::Paragraph(Paragraph { line, offset: 0 }));
-        return Ok(());
-    };
-
-    let Some((req_id, metadata)) = parse_req_marker_inner(id_str) else {
-        let line = byte_offset_to_line(source, first.loc.start as usize);
-        result
-            .elements
-            .push(DocElement::Paragraph(Paragraph { line, offset: 0 }));
-        return Ok(());
-    };
+    let id_str = attrs
+        .id()
+        .map(|s| s.as_ref())
+        .ok_or_else(|| eyre::eyre!("requirement block missing `id=\"...\"` attribute"))?;
+    let req_id = marq::parse_rule_id(id_str)
+        .ok_or_else(|| eyre::eyre!("invalid requirement id '{}'", id_str))?;
 
     if seen_bases.contains(&req_id.base) {
         eyre::bail!("Duplicate requirement '{}' in AsciiDoc file", req_id.base);
     }
     seen_bases.insert(req_id.base.clone());
 
-    let span_start = first.loc.start as usize;
-    let span_end = inlines
-        .last_loc()
-        .map_or(span_start, |l| l.end as usize);
-    let line = byte_offset_to_line(source, span_start);
+    let mut metadata = ReqMetadata::default();
+    if let Some(v) = attrs.named("status") {
+        metadata.status = marq::ReqStatus::parse(v);
+    }
+    if let Some(v) = attrs.named("level") {
+        metadata.level = marq::ReqLevel::parse(v);
+    }
+    if let Some(v) = attrs.named("since") {
+        metadata.since = Some(v.to_string());
+    }
+    if let Some(v) = attrs.named("until") {
+        metadata.until = Some(v.to_string());
+    }
+    if let Some(v) = attrs.named("tags") {
+        metadata.tags = v.split(',').map(|s| s.trim().to_string()).collect();
+    }
 
-    let marker_len = marker_end + 1;
+    // Marker span: the source range of whichever `[...]` attribute-list line
+    // carries the `id=` attribute (brackets included), so `rewrite_marker` can
+    // splice a bumped id in place, byte-for-byte.
+    let marker_loc = attrs
+        .iter()
+        .find(|a| a.id.is_some())
+        .map(|a| a.loc)
+        .unwrap_or(block.meta.start_loc);
+    let marker_span = SourceSpan {
+        offset: marker_loc.start as usize,
+        length: (marker_loc.end - marker_loc.start) as usize,
+    };
+
+    let (span_start, span_end) = content_span(&block.content).unwrap_or((
+        marker_loc.end as usize,
+        marker_loc.end as usize,
+    ));
+    let line = byte_offset_to_line(source, span_start);
     let anchor = req_anchor_id(&req_id.to_string());
 
-    let block_source = source
+    let raw = source
         .get(span_start..span_end.min(source.len()))
-        .unwrap_or("");
-    let after_marker = block_source
-        .get(marker_len..)
         .unwrap_or("")
-        .trim_start_matches([' ', '\t', '\n', '\r']);
-    let raw = after_marker.trim_end().to_string();
-
-    let req_html = render_req_body_html(&raw);
+        .trim()
+        .to_string();
 
     let req = ReqDefinition {
         id: req_id,
         anchor_id: anchor,
-        marker_span: SourceSpan {
-            offset: span_start,
-            length: marker_len,
-        },
+        marker_span,
         span: SourceSpan {
             offset: span_start,
             length: span_end.saturating_sub(span_start),
@@ -219,12 +219,60 @@ fn walk_paragraph<'arena>(
         line,
         metadata,
         raw,
-        html: req_html,
+        // Filled in later, once the AsciiDoc HTML backend has rendered the
+        // full document — see `mod.rs`'s `post_process_html`. This block is a
+        // real, distinct AsciiDoc construct, so its HTML is spliced out of
+        // asciidork's own render rather than reimplemented here.
+        html: String::new(),
     };
 
     result.elements.push(DocElement::Req(req.clone()));
     result.reqs.push(req);
+
+    // Still walk any nested blocks (e.g. admonitions, nested lists) so their
+    // inline code spans are collected for hover/search.
+    if let BlockContent::Compound(inner_blocks) = &block.content {
+        for inner in inner_blocks {
+            collect_inline_spans_recursive(inner, &mut result.inline_code_spans);
+        }
+    } else if let BlockContent::Simple(inlines) = &block.content {
+        collect_spans_from_inlines(inlines, &mut result.inline_code_spans);
+    }
+
     Ok(())
+}
+
+/// Compute the byte span of a block's own content, excluding its attribute
+/// list, title, and (for compound blocks) delimiter lines.
+fn content_span(content: &BlockContent<'_>) -> Option<(usize, usize)> {
+    match content {
+        BlockContent::Simple(inlines) => {
+            let start = inlines.first()?.loc.start as usize;
+            let end = inlines.last_loc().map_or(start, |l| l.end as usize);
+            Some((start, end))
+        }
+        BlockContent::Compound(inner_blocks) => {
+            let start = inner_blocks.first()?.loc.start_pos as usize;
+            let end = content.last_loc().map_or(start, |l| l.end as usize);
+            Some((start, end))
+        }
+        _ => None,
+    }
+}
+
+fn collect_inline_spans_recursive<'arena>(
+    block: &Block<'arena>,
+    spans: &mut Vec<InlineCodeSpan>,
+) {
+    match &block.content {
+        BlockContent::Simple(inlines) => collect_spans_from_inlines(inlines, spans),
+        BlockContent::Compound(inner_blocks) => {
+            for inner in inner_blocks {
+                collect_inline_spans_recursive(inner, spans);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn collect_spans_from_inlines<'arena>(
@@ -253,73 +301,4 @@ fn collect_spans_from_inlines<'arena>(
             _ => {}
         }
     }
-}
-
-pub fn render_req_body_html(raw: &str) -> String {
-    if raw.is_empty() {
-        return String::new();
-    }
-    let mut html = String::new();
-    for para in raw.split("\n\n") {
-        let trimmed = para.trim();
-        if !trimmed.is_empty() {
-            html.push_str("<p>");
-            html.push_str(&html_escape(trimmed));
-            html.push_str("</p>\n");
-        }
-    }
-    html
-}
-
-/// Parse a requirement leading marker at the start of a line.
-///
-/// Returns `(prefix, id_str, marker_end_offset)` where `marker_end_offset`
-/// is the index of the closing `]` (inclusive).
-pub fn parse_req_leading_marker(line: &str) -> Option<(&str, &str, usize)> {
-    let mut prefix_len = 0usize;
-    for ch in line.chars() {
-        if ch.is_ascii_lowercase() || ch.is_ascii_digit() {
-            prefix_len += ch.len_utf8();
-        } else {
-            break;
-        }
-    }
-    if prefix_len == 0 || line.as_bytes().get(prefix_len) != Some(&b'[') {
-        return None;
-    }
-    let close = line.find(']')?;
-    if close <= prefix_len + 1 {
-        return None;
-    }
-    let prefix = &line[..prefix_len];
-    let id_str = &line[prefix_len + 1..close];
-    Some((prefix, id_str, close))
-}
-
-pub fn parse_req_marker_inner(inner: &str) -> Option<(marq::RuleId, ReqMetadata)> {
-    let inner = inner.trim();
-    let (id_part, attrs_str) = match inner.find(' ') {
-        Some(idx) => (&inner[..idx], inner[idx + 1..].trim()),
-        None => (inner, ""),
-    };
-    let req_id = marq::parse_rule_id(id_part)?;
-    let mut metadata = ReqMetadata::default();
-    if !attrs_str.is_empty() {
-        for attr in attrs_str.split_whitespace() {
-            if let Some((key, value)) = attr.split_once('=') {
-                match key {
-                    "status" => metadata.status = marq::ReqStatus::parse(value),
-                    "level" => metadata.level = marq::ReqLevel::parse(value),
-                    "since" => metadata.since = Some(value.to_string()),
-                    "until" => metadata.until = Some(value.to_string()),
-                    "tags" => {
-                        metadata.tags =
-                            value.split(',').map(|s| s.trim().to_string()).collect()
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-    Some((req_id, metadata))
 }

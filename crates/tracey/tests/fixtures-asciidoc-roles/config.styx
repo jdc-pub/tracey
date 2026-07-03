@@ -1,0 +1,16 @@
+// Tracey configuration for AsciiDocRoles integration tests
+
+specs (
+  {
+    name test
+    syntax asciidoc-roles
+    include (spec.adoc)
+    impls (
+      {
+        name rust
+        include (src/**/*.rs)
+        test_include (src/tests.rs)
+      }
+    )
+  }
+)

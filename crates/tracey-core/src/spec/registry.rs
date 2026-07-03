@@ -129,6 +129,7 @@ pub(crate) static BACKENDS: &[&dyn DynBackend] = &[
     &super::typst::Typst,
     &super::sdoc::Sdoc,
     &super::asciidoc::Asciidoc,
+    &super::asciidoc_roles::AsciiDocRoles,
 ];
 
 /// Per-spec-set config bundle for every registered backend.
