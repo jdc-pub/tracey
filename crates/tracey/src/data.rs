@@ -67,6 +67,9 @@ pub struct DashboardData {
     /// Per-format render options by spec name. Converted into
     /// [`tracey_core::SpecConfigs`] on demand via [`build_spec_configs`].
     pub format_config_by_spec: BTreeMap<String, FormatConfig>,
+    /// `SpecConfig.syntax` override by spec name, when a spec's format can't
+    /// be inferred from extension alone (e.g. `asciidoc` vs `asciidoc-roles`).
+    pub syntax_override_by_spec: BTreeMap<String, Option<String>>,
     /// Source files for full-text index construction
     pub search_files: BTreeMap<PathBuf, String>,
     /// Parsed requirement references and warnings by source file, captured during rebuild.
@@ -755,6 +758,24 @@ fn get_cached_spec_scan_paths(
     (entry.files.clone(), warnings, did_full_walk)
 }
 
+/// Resolve the [`SpecFormat`] for a spec file, honoring an explicit
+/// `SpecConfig.syntax` override before falling back to extension inference.
+///
+/// Errors if `syntax_override` names a format with no registered backend —
+/// silently falling back would hide a config typo behind the wrong parser.
+fn resolve_spec_format(path: &Path, syntax_override: Option<&str>) -> Result<SpecFormat> {
+    if let Some(name) = syntax_override {
+        return SpecFormat::from_name(name).ok_or_else(|| {
+            eyre::eyre!(
+                "Unknown `syntax` \"{}\" for spec file {} — check the `syntax` field in config.styx",
+                name,
+                path.display()
+            )
+        });
+    }
+    Ok(SpecFormat::from_path(path).unwrap_or(SpecFormat::Markdown))
+}
+
 async fn extract_spec_rules_cached(
     project_root: &Path,
     path: &Path,
@@ -762,6 +783,7 @@ async fn extract_spec_rules_cached(
     cache: &mut BuildCache,
     quiet: bool,
     stats: &mut CacheStats,
+    syntax_override: Option<&str>,
 ) -> Result<Vec<crate::ExtractedRule>> {
     let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let overlay_content = overlay
@@ -814,7 +836,7 @@ async fn extract_spec_rules_cached(
         compute_relative_path(project_root, &canonical)
     };
 
-    let fmt = SpecFormat::from_path(&canonical).unwrap_or(SpecFormat::Markdown);
+    let fmt = resolve_spec_format(&canonical, syntax_override)?;
     let doc = parse_spec(fmt, &content)
         .await
         .map_err(|e| eyre::eyre!("Failed to process {}: {}", canonical.display(), e))?;
@@ -844,6 +866,7 @@ async fn extract_spec_rules_cached(
     Ok(extracted)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn load_rules_from_includes_cached(
     project_root: &Path,
     include_patterns: &[String],
@@ -852,6 +875,7 @@ async fn load_rules_from_includes_cached(
     quiet: bool,
     changed_files: &[PathBuf],
     stats: &mut CacheStats,
+    syntax_override: Option<&str>,
 ) -> Result<(Vec<crate::ExtractedRule>, Vec<PathBuf>, bool)> {
     let (mut spec_paths, _warnings, did_full_walk) =
         get_cached_spec_scan_paths(project_root, include_patterns, changed_files, cache);
@@ -870,7 +894,8 @@ async fn load_rules_from_includes_cached(
     let collected_paths: Vec<PathBuf> = spec_paths.into_iter().collect();
     for path in &collected_paths {
         let extracted =
-            extract_spec_rules_cached(project_root, path, overlay, cache, quiet, stats).await?;
+            extract_spec_rules_cached(project_root, path, overlay, cache, quiet, stats, syntax_override)
+                .await?;
         for rule in extracted {
             let id = rule.def.id.to_string();
             if seen_ids.contains(&id) {
@@ -1610,6 +1635,7 @@ async fn compute_workspace_diagnostics(
     source_reqs_by_file: &BTreeMap<PathBuf, Reqs>,
     file_contents: &BTreeMap<PathBuf, String>,
     spec_file_contents: &BTreeMap<PathBuf, String>,
+    spec_file_syntax: &BTreeMap<PathBuf, Option<String>>,
     test_files: &std::collections::HashSet<PathBuf>,
     include_parse_failures: &BTreeMap<PathBuf, String>,
 ) -> Vec<LspFileDiagnostics> {
@@ -1643,7 +1669,14 @@ async fn compute_workspace_diagnostics(
 
     // Spec file diagnostics (coverage hints + cross-reference validation)
     out.extend(
-        compute_spec_file_diagnostics(abs_root, config, forward_by_impl, spec_file_contents).await,
+        compute_spec_file_diagnostics(
+            abs_root,
+            config,
+            forward_by_impl,
+            spec_file_contents,
+            spec_file_syntax,
+        )
+        .await,
     );
 
     if !include_parse_failures.is_empty() {
@@ -1719,6 +1752,7 @@ async fn compute_spec_file_diagnostics(
     config: &ApiConfig,
     forward_by_impl: &BTreeMap<ImplKey, ApiSpecForward>,
     spec_file_contents: &BTreeMap<PathBuf, String>,
+    spec_file_syntax: &BTreeMap<PathBuf, Option<String>>,
 ) -> Vec<LspFileDiagnostics> {
     let mut out = Vec::new();
 
@@ -1749,7 +1783,10 @@ async fn compute_spec_file_diagnostics(
         let mut diagnostics = Vec::new();
 
         // Coverage diagnostics: parse the spec doc to get requirement definitions
-        let fmt = SpecFormat::from_path(path).unwrap_or(SpecFormat::Markdown);
+        let syntax_override = spec_file_syntax.get(path).and_then(|o| o.as_deref());
+        let Ok(fmt) = resolve_spec_format(path, syntax_override) else {
+            continue;
+        };
         if let Ok(doc) = parse_spec(fmt, content).await {
             for def in &doc.reqs {
                 let (start_line, start_char, end_line, end_char) =
@@ -2161,8 +2198,10 @@ pub async fn build_dashboard_data_with_overlay_and_cache(
     let specs_content_by_impl: BTreeMap<ImplKey, ApiSpecData> = BTreeMap::new();
     let mut spec_includes_by_name: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut format_config_by_spec: BTreeMap<String, FormatConfig> = BTreeMap::new();
+    let mut syntax_override_by_spec: BTreeMap<String, Option<String>> = BTreeMap::new();
     let mut all_file_contents: BTreeMap<PathBuf, String> = BTreeMap::new();
     let mut all_spec_file_contents: BTreeMap<PathBuf, String> = BTreeMap::new();
+    let mut all_spec_file_syntax: BTreeMap<PathBuf, Option<String>> = BTreeMap::new();
     let mut all_source_reqs_by_file: BTreeMap<PathBuf, Reqs> = BTreeMap::new();
     let mut all_search_rules: Vec<search::RuleEntry> = Vec::new();
     let mut total_extracted_rules = 0usize;
@@ -2278,12 +2317,16 @@ pub async fn build_dashboard_data_with_overlay_and_cache(
                 quiet,
                 changed_files,
                 &mut cache_stats,
+                spec_config.syntax.as_deref(),
             )
             .await?;
         total_extracted_rules += extracted_rules.len();
 
         // Collect spec file contents for workspace diagnostics
         for spec_path in &spec_file_paths {
+            all_spec_file_syntax
+                .entry(spec_path.clone())
+                .or_insert_with(|| spec_config.syntax.clone());
             if !all_spec_file_contents.contains_key(spec_path)
                 && let Ok(content) = read_file_with_overlay(spec_path, overlay).await
             {
@@ -2330,6 +2373,7 @@ pub async fn build_dashboard_data_with_overlay_and_cache(
         });
         spec_includes_by_name.insert(spec_name.clone(), include_patterns.clone());
         format_config_by_spec.insert(spec_name.clone(), spec_config.format.clone());
+        syntax_override_by_spec.insert(spec_name.clone(), spec_config.syntax.clone());
 
         // Build data for each implementation
         struct ImplComputeTaskMeta {
@@ -2572,6 +2616,7 @@ pub async fn build_dashboard_data_with_overlay_and_cache(
         &all_source_reqs_by_file,
         &all_file_contents,
         &all_spec_file_contents,
+        &all_spec_file_syntax,
         &test_files,
         &include_parse_failures,
     )
@@ -2603,6 +2648,7 @@ pub async fn build_dashboard_data_with_overlay_and_cache(
         specs_content_by_impl,
         spec_includes_by_name,
         format_config_by_spec,
+        syntax_override_by_spec,
         search_files: all_file_contents,
         source_reqs_by_file: all_source_reqs_by_file,
         search_rules: all_search_rules,
@@ -2652,6 +2698,7 @@ async fn load_spec_content(
     specs_content: &mut BTreeMap<String, ApiSpecData>,
     overlay: &FileOverlay,
     spec_file_deps: &mut std::collections::HashSet<PathBuf>,
+    syntax_override: Option<&str>,
 ) -> Result<()> {
     use ignore::WalkBuilder;
 
@@ -2677,6 +2724,18 @@ async fn load_spec_content(
 
     let spec_cfgs = build_spec_configs(format, root);
 
+    // Resolved once: constant across every file in this spec's include set.
+    let override_fmt = match syntax_override {
+        Some(name) => Some(SpecFormat::from_name(name).ok_or_else(|| {
+            eyre::eyre!(
+                "Unknown `syntax` \"{}\" for spec '{}' — check the `syntax` field in config.styx",
+                name,
+                spec_name
+            )
+        })?),
+        None => None,
+    };
+
     // Collect all matching files with their content, weight, and format
     let mut files: Vec<(String, String, i32, SpecFormat)> = Vec::new();
 
@@ -2689,10 +2748,6 @@ async fn load_spec_content(
     for entry in walker.flatten() {
         let path = entry.path();
 
-        let Some(fmt) = SpecFormat::from_path(path) else {
-            continue;
-        };
-
         let relative = path.strip_prefix(root).unwrap_or(path);
 
         // Check if path matches any of the patterns
@@ -2704,6 +2759,10 @@ async fn load_spec_content(
         if !matches_any {
             continue;
         }
+
+        let Some(fmt) = override_fmt.or_else(|| SpecFormat::from_path(path)) else {
+            continue;
+        };
 
         if let Ok(content) = read_file_with_overlay(path, overlay).await {
             // Parse frontmatter / metadata to get weight
@@ -2821,6 +2880,7 @@ async fn load_spec_content(
 /// when compilation fails — fixing a syntax error in a helper must trigger a
 /// rebuild. Markdown specs and the `typst-spec`-disabled fallback leave it
 /// untouched.
+#[allow(clippy::too_many_arguments)]
 pub async fn render_spec_content_for_impl(
     project_root: &Path,
     include_patterns: &[String],
@@ -2829,6 +2889,7 @@ pub async fn render_spec_content_for_impl(
     format: &FormatConfig,
     forward: &ApiSpecForward,
     deps: &mut std::collections::HashSet<PathBuf>,
+    syntax_override: Option<&str>,
 ) -> Result<ApiSpecData> {
     let mut coverage: BTreeMap<String, RuleCoverage> = BTreeMap::new();
     for rule in &forward.rules {
@@ -2868,6 +2929,7 @@ pub async fn render_spec_content_for_impl(
         &mut map,
         &FileOverlay::new(),
         &mut abs_deps,
+        syntax_override,
     )
     .await;
     // Relativize deps into the out-param BEFORE propagating any error: a

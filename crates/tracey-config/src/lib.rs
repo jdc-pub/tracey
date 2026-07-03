@@ -39,6 +39,13 @@ pub struct SpecConfig {
     #[facet(default)]
     pub include: Vec<String>,
 
+    /// Explicit format override (by `SpecFormat::name()`, e.g. "asciidoc-roles").
+    /// Only needed when a format can't be inferred from file extension alone
+    /// (e.g. choosing between `asciidoc` and `asciidoc-roles`, which share
+    /// extensions). When unset, format is inferred from extension as today.
+    #[facet(default)]
+    pub syntax: Option<String>,
+
     /// Per-format render options. Only set when a spec format you use needs
     /// configuration (currently only typst).
     #[facet(default)]
