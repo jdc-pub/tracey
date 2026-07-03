@@ -1,0 +1,84 @@
+= Test AsciiDocRoles Specification
+
+This is a test AsciiDoc specification (native role syntax) for integration testing.
+
+== Authentication
+
+[role="requirement", id="auth.login"]
+--
+Users MUST provide valid credentials to log in.
+--
+
+[role="requirement", id="auth.session"]
+--
+Sessions MUST expire after 24 hours of inactivity.
+--
+
+[role="requirement", id="auth.logout"]
+--
+Users MUST be able to log out and invalidate their session.
+--
+
+== Data Validation
+
+[role="requirement", id="data.required-fields"]
+--
+All required fields MUST be validated before processing.
+--
+
+[role="requirement", id="data.format"]
+--
+Email addresses MUST be validated against RFC 5322 format.
+--
+
+== Error Handling
+
+[role="requirement", id="error.codes", status="deprecated", tags="legacy,audit"]
+--
+All errors MUST include a machine-readable error code.
+--
+
+[role="requirement", id="error.messages"]
+--
+Error messages MUST be human-readable and actionable.
+--
+
+== Rich Content
+
+[role="requirement", id="rich.content"]
+.Rich content example
+--
+The system MUST render admonitions and links inside requirement bodies.
+
+NOTE: This is an admonition inside a requirement body.
+
+See link:#error.codes[the error codes requirement] for related behavior.
+--
+
+== Masking Examples
+
+The following listing block MUST NOT produce a requirement:
+
+----
+[role="requirement", id="masked.example"]
+--
+This marker is inside a listing block and must be ignored.
+--
+----
+
+////
+[role="requirement", id="masked.block-comment"]
+--
+This block comment marker must be ignored.
+--
+////
+
+== Non-Requirement Open Block
+
+--
+This is a plain open block with no role attribute and must not be a requirement.
+--
+
+== Mixed Syntax
+
+r[mixed.marker] The classic leading-marker syntax MUST keep working in the same file.

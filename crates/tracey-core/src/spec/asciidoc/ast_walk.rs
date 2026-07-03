@@ -3,8 +3,8 @@
 use std::collections::HashSet;
 
 use asciidork_ast::{
-    AttrValue, Block, BlockContent, BlockContext, DocContent, Document, Inline, InlineNodes,
-    ReadAttr, Section,
+    AttrData, AttrValue, Block, BlockContent, BlockContext, DocContent, Document, Inline,
+    InlineNodes, ReadAttr, Section,
 };
 use marq::{
     DocElement, Heading, InlineCodeSpan, Paragraph, ReqDefinition, ReqMetadata, SourceSpan,
@@ -117,6 +117,13 @@ fn walk_block<'arena>(
     result: &mut WalkResult,
     seen_bases: &mut HashSet<String>,
 ) -> eyre::Result<()> {
+    if block.context == BlockContext::Open
+        && block.meta.attrs.has_role("requirement")
+        && extract_req_block(block, source, result, seen_bases)?
+    {
+        return Ok(());
+    }
+
     match &block.content {
         BlockContent::Simple(inlines) if block.context == BlockContext::Paragraph => {
             walk_paragraph(inlines, source, result, seen_bases)?;
@@ -225,6 +232,133 @@ fn walk_paragraph<'arena>(
     result.elements.push(DocElement::Req(req.clone()));
     result.reqs.push(req);
     Ok(())
+}
+
+/// Extract a `[role="requirement"]` open block as a requirement definition.
+///
+/// Returns `Ok(false)` when the block has no parseable `id="..."` attribute,
+/// so the caller falls back to treating it as an ordinary block — mirroring
+/// how an unparsable `r[...]` marker degrades to a plain paragraph.
+fn extract_req_block<'arena>(
+    block: &Block<'arena>,
+    source: &str,
+    result: &mut WalkResult,
+    seen_bases: &mut HashSet<String>,
+) -> eyre::Result<bool> {
+    let attrs = &block.meta.attrs;
+
+    let Some(req_id) = attrs.id().and_then(|s| marq::parse_rule_id(s.as_ref())) else {
+        return Ok(false);
+    };
+
+    if seen_bases.contains(&req_id.base) {
+        eyre::bail!("Duplicate requirement '{}' in AsciiDoc file", req_id.base);
+    }
+    seen_bases.insert(req_id.base.clone());
+
+    let mut metadata = ReqMetadata::default();
+    if let Some(v) = attrs.named("status") {
+        metadata.status = marq::ReqStatus::parse(v);
+    }
+    if let Some(v) = attrs.named("level") {
+        metadata.level = marq::ReqLevel::parse(v);
+    }
+    if let Some(v) = attrs.named("since") {
+        metadata.since = Some(v.to_string());
+    }
+    if let Some(v) = attrs.named("until") {
+        metadata.until = Some(v.to_string());
+    }
+    if let Some(v) = attrs.named("tags") {
+        metadata.tags = v.split(',').map(|s| s.trim().to_string()).collect();
+    }
+
+    // Marker span: the source range of whichever `[...]` attribute-list line
+    // carries the `id=` attribute (brackets included), so `rewrite_marker` can
+    // splice a bumped id in place, byte-for-byte.
+    let marker_loc = attrs
+        .iter()
+        .find(|a| a.id.is_some())
+        .map(|a| a.loc)
+        .unwrap_or(block.meta.start_loc);
+    let marker_span = SourceSpan {
+        offset: marker_loc.start as usize,
+        length: (marker_loc.end - marker_loc.start) as usize,
+    };
+
+    let (span_start, span_end) = content_span(&block.content)
+        .unwrap_or((marker_loc.end as usize, marker_loc.end as usize));
+    let line = byte_offset_to_line(source, span_start);
+    let anchor = req_anchor_id(&req_id.to_string());
+
+    let raw = source
+        .get(span_start..span_end.min(source.len()))
+        .unwrap_or("")
+        .trim()
+        .to_string();
+
+    let req = ReqDefinition {
+        id: req_id,
+        anchor_id: anchor,
+        marker_span,
+        span: SourceSpan {
+            offset: span_start,
+            length: span_end.saturating_sub(span_start),
+        },
+        line,
+        metadata,
+        raw,
+        // Filled in later, once the AsciiDoc HTML backend has rendered the
+        // full document — see `mod.rs`'s `post_process_html`. This block is a
+        // real, distinct AsciiDoc construct, so its HTML is spliced out of
+        // asciidork's own render rather than reimplemented here.
+        html: String::new(),
+    };
+
+    result.elements.push(DocElement::Req(req.clone()));
+    result.reqs.push(req);
+
+    // Still walk any nested blocks (e.g. admonitions, nested lists) so their
+    // inline code spans are collected for hover/search.
+    if let BlockContent::Compound(inner_blocks) = &block.content {
+        for inner in inner_blocks {
+            collect_inline_spans_recursive(inner, &mut result.inline_code_spans);
+        }
+    } else if let BlockContent::Simple(inlines) = &block.content {
+        collect_spans_from_inlines(inlines, &mut result.inline_code_spans);
+    }
+
+    Ok(true)
+}
+
+/// Compute the byte span of a block's own content, excluding its attribute
+/// list, title, and (for compound blocks) delimiter lines.
+fn content_span(content: &BlockContent<'_>) -> Option<(usize, usize)> {
+    match content {
+        BlockContent::Simple(inlines) => {
+            let start = inlines.first()?.loc.start as usize;
+            let end = inlines.last_loc().map_or(start, |l| l.end as usize);
+            Some((start, end))
+        }
+        BlockContent::Compound(inner_blocks) => {
+            let start = inner_blocks.first()?.loc.start_pos as usize;
+            let end = content.last_loc().map_or(start, |l| l.end as usize);
+            Some((start, end))
+        }
+        _ => None,
+    }
+}
+
+fn collect_inline_spans_recursive<'arena>(block: &Block<'arena>, spans: &mut Vec<InlineCodeSpan>) {
+    match &block.content {
+        BlockContent::Simple(inlines) => collect_spans_from_inlines(inlines, spans),
+        BlockContent::Compound(inner_blocks) => {
+            for inner in inner_blocks {
+                collect_inline_spans_recursive(inner, spans);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn collect_spans_from_inlines<'arena>(
