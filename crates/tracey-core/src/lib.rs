@@ -36,4 +36,4 @@ pub use spec::{
 };
 
 #[cfg(feature = "walk")]
-pub use sources::WalkSources;
+pub use sources::{GitRefSources, WalkSources};

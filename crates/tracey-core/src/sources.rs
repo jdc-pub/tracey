@@ -260,6 +260,128 @@ impl Sources for WalkSources {
     }
 }
 
+/// Sources resolved from a pinned git ref instead of the working tree.
+///
+/// Given a ref (branch, tag, or SHA — resolved via `git rev-parse` at read
+/// time, so a floating branch name is re-resolved on every call rather than
+/// locked), lists files at that ref with `git ls-tree -r --name-only` and
+/// reads each matched file's content with `git cat-file blob`. Shells out to
+/// the `git` CLI, matching the existing convention in `tracey`'s `bump.rs`
+/// rather than adding a `gix`/`git2` dependency.
+#[cfg(feature = "walk")]
+pub struct GitRefSources {
+    repo_root: PathBuf,
+    git_ref: String,
+    include: Vec<String>,
+    exclude: Vec<String>,
+}
+
+#[cfg(feature = "walk")]
+impl GitRefSources {
+    /// Create sources rooted at `repo_root`'s git repository, reading files
+    /// as they exist at `git_ref`.
+    pub fn new(repo_root: impl Into<PathBuf>, git_ref: impl Into<String>) -> Self {
+        Self {
+            repo_root: repo_root.into(),
+            git_ref: git_ref.into(),
+            include: Vec::new(),
+            exclude: Vec::new(),
+        }
+    }
+
+    /// Add include patterns (e.g., `["**/*.rs"]`)
+    pub fn include(mut self, patterns: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.include.extend(patterns.into_iter().map(Into::into));
+        self
+    }
+
+    /// Add exclude patterns (e.g., `["target/**"]`)
+    pub fn exclude(mut self, patterns: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.exclude.extend(patterns.into_iter().map(Into::into));
+        self
+    }
+}
+
+#[cfg(feature = "walk")]
+fn git_run(repo_root: &Path, args: &[&str]) -> Result<String> {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .current_dir(repo_root)
+        .output()
+        .map_err(|e| eyre::eyre!("failed to run git {}: {e}", args.join(" ")))?;
+
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        eyre::bail!("git {} failed: {}", args.join(" "), stderr.trim());
+    }
+
+    String::from_utf8(out.stdout)
+        .map_err(|_| eyre::eyre!("git {} output is not valid UTF-8", args.join(" ")))
+}
+
+#[cfg(feature = "walk")]
+impl Sources for GitRefSources {
+    fn extract(self) -> Result<ExtractionResult> {
+        let resolved_ref = git_run(
+            &self.repo_root,
+            &["rev-parse", "--verify", &self.git_ref],
+        )?
+        .trim()
+        .to_string();
+
+        let listing = git_run(
+            &self.repo_root,
+            &["ls-tree", "-r", "--name-only", &resolved_ref],
+        )?;
+
+        let mut reqs = Reqs::new();
+        let mut warnings = Vec::new();
+
+        for rel_path in listing.lines() {
+            let path = Path::new(rel_path);
+
+            if path
+                .extension()
+                .is_none_or(|ext| !is_supported_extension(ext))
+            {
+                continue;
+            }
+            if !is_included(path, Path::new(""), &self.include) {
+                continue;
+            }
+            if is_excluded(path, Path::new(""), &self.exclude) {
+                continue;
+            }
+
+            let spec = format!("{resolved_ref}:{rel_path}");
+            let out = std::process::Command::new("git")
+                .args(["cat-file", "blob", &spec])
+                .current_dir(&self.repo_root)
+                .output()
+                .map_err(|e| eyre::eyre!("failed to run git cat-file blob {spec}: {e}"))?;
+
+            if !out.status.success() {
+                warnings.push(format!(
+                    "Warning: failed to read {rel_path} at {resolved_ref}: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ));
+                continue;
+            }
+
+            let Ok(content) = String::from_utf8(out.stdout) else {
+                warnings.push(format!(
+                    "Warning: {rel_path} at {resolved_ref} is not valid UTF-8"
+                ));
+                continue;
+            };
+
+            extract_from_content(path, &content, &mut reqs);
+        }
+
+        Ok(ExtractionResult { reqs, warnings })
+    }
+}
+
 #[cfg(feature = "walk")]
 fn is_included(path: &Path, root: &Path, patterns: &[String]) -> bool {
     if patterns.is_empty() {
@@ -610,6 +732,103 @@ mod tests {
         assert!(!is_supported_extension(OsStr::new("md")));
         assert!(!is_supported_extension(OsStr::new("txt")));
         assert!(!is_supported_extension(OsStr::new("json")));
+    }
+
+    #[cfg(feature = "walk")]
+    mod git_ref_tests {
+        use super::super::*;
+        use std::process::Command;
+
+        /// Create a tempdir git repo with an initial commit, then a second
+        /// commit that modifies/adds files — so tests can pin to either ref.
+        fn make_repo() -> tempfile::TempDir {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+
+            let run = |args: &[&str]| {
+                let out = Command::new("git")
+                    .args(args)
+                    .current_dir(root)
+                    .output()
+                    .expect("failed to run git");
+                assert!(
+                    out.status.success(),
+                    "git {:?} failed: {}",
+                    args,
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            };
+
+            run(&["init", "-q"]);
+            run(&["config", "user.email", "test@example.com"]);
+            run(&["config", "user.name", "Test"]);
+
+            std::fs::write(root.join("lib.rs"), "// r[impl git.req.one]").unwrap();
+            std::fs::create_dir_all(root.join("sub")).unwrap();
+            std::fs::write(root.join("sub/mod.rs"), "// r[impl git.req.two]").unwrap();
+            std::fs::write(root.join("notes.txt"), "not scanned").unwrap();
+            run(&["add", "."]);
+            run(&["commit", "-q", "-m", "first"]);
+            run(&["tag", "-m", "v1", "v1"]);
+
+            std::fs::write(root.join("lib.rs"), "// r[impl git.req.one.updated]").unwrap();
+            run(&["add", "."]);
+            run(&["commit", "-q", "-m", "second"]);
+
+            dir
+        }
+
+        #[test]
+        fn test_git_ref_sources_reads_pinned_ref() {
+            let dir = make_repo();
+
+            let result = Reqs::extract(GitRefSources::new(dir.path(), "v1").include(["**/*.rs"]))
+                .unwrap();
+
+            let ids: Vec<String> = result.reqs.references.iter().map(|r| r.req_id.to_string()).collect();
+            assert!(ids.contains(&"git.req.one".to_string()));
+            assert!(ids.contains(&"git.req.two".to_string()));
+            assert!(result.warnings.is_empty());
+        }
+
+        #[test]
+        fn test_git_ref_sources_head_sees_later_commit() {
+            let dir = make_repo();
+
+            let result =
+                Reqs::extract(GitRefSources::new(dir.path(), "HEAD").include(["**/*.rs"]))
+                    .unwrap();
+
+            let ids: Vec<String> = result.reqs.references.iter().map(|r| r.req_id.to_string()).collect();
+            assert!(ids.contains(&"git.req.one.updated".to_string()));
+            assert!(!ids.contains(&"git.req.one".to_string()));
+        }
+
+        #[test]
+        fn test_git_ref_sources_respects_extension_filter() {
+            let dir = make_repo();
+
+            let result = Reqs::extract(GitRefSources::new(dir.path(), "v1").include(["**/*.rs"]))
+                .unwrap();
+
+            assert!(
+                result
+                    .reqs
+                    .references
+                    .iter()
+                    .all(|r| r.file.extension().is_some_and(|e| e == "rs"))
+            );
+        }
+
+        #[test]
+        fn test_git_ref_sources_unknown_ref_errors() {
+            let dir = make_repo();
+
+            let result =
+                Reqs::extract(GitRefSources::new(dir.path(), "not-a-real-ref").include(["**/*.rs"]));
+
+            assert!(result.is_err());
+        }
     }
 
     #[cfg(feature = "walk")]

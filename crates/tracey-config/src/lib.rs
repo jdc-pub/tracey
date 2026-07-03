@@ -46,6 +46,14 @@ pub struct SpecConfig {
     #[facet(default)]
     pub syntax: Option<String>,
 
+    /// Git ref to resolve this spec's `include` files against instead of the
+    /// live working tree (e.g. a tag, branch, or commit SHA). Accepts any ref
+    /// string and is re-resolved via `git rev-parse` at read time, so a
+    /// branch name floats rather than being locked to a SHA.
+    /// r[impl config.spec.git-ref]
+    #[facet(default)]
+    pub git_ref: Option<String>,
+
     /// Per-format render options. Only set when a spec format you use needs
     /// configuration (currently only typst).
     #[facet(default)]
