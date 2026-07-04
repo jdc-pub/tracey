@@ -7,6 +7,7 @@
 //! via `parse_spec`.
 
 use tracey_core::spec::{SourceSpan, SpecFormat, extract_marker_prefix, id_range_in_marker, parse_spec, parse_weight, rewrite_marker};
+use marq::DocElement;
 
 // ============================================================================
 // Parsing: basic requirement blocks
@@ -80,6 +81,33 @@ Body.
         doc.reqs[0].metadata.tags.is_empty(),
         "an empty tags attribute should yield no tags, got {:?}",
         doc.reqs[0].metadata.tags
+    );
+}
+
+#[tokio::test]
+async fn test_roles_elements_html_matches_reqs_html() {
+    let src = r#"= Title
+
+[role="requirement", id="auth.login"]
+--
+Users MUST log in with valid credentials.
+--
+"#;
+    let doc = parse_spec(SpecFormat::AsciiDoc, src).await.expect("parse");
+    assert_eq!(doc.reqs.len(), 1);
+    assert!(!doc.reqs[0].html.is_empty(), "doc.reqs should have rendered html");
+
+    let element_req = doc
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            DocElement::Req(r) if r.id == doc.reqs[0].id => Some(r),
+            _ => None,
+        })
+        .expect("elements should contain the matching Req");
+    assert_eq!(
+        element_req.html, doc.reqs[0].html,
+        "doc.elements' Req entry should carry the same rendered html as doc.reqs"
     );
 }
 
