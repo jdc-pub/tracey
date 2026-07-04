@@ -287,20 +287,10 @@ fn extract_req_block<'arena>(
     seen_bases.insert(req_id.base.clone());
 
     let mut metadata = ReqMetadata::default();
-    if let Some(v) = attrs.named("status") {
-        metadata.status = marq::ReqStatus::parse(v);
-    }
-    if let Some(v) = attrs.named("level") {
-        metadata.level = marq::ReqLevel::parse(v);
-    }
-    if let Some(v) = attrs.named("since") {
-        metadata.since = Some(v.to_string());
-    }
-    if let Some(v) = attrs.named("until") {
-        metadata.until = Some(v.to_string());
-    }
-    if let Some(v) = attrs.named("tags") {
-        metadata.tags = v.split(',').map(|s| s.trim().to_string()).collect();
+    for key in ["status", "level", "since", "until", "tags"] {
+        if let Some(v) = attrs.named(key) {
+            apply_metadata_attr(&mut metadata, key, v);
+        }
     }
 
     let (span_start, span_end) =
@@ -462,21 +452,31 @@ pub fn parse_req_marker_inner(inner: &str) -> Option<(marq::RuleId, ReqMetadata)
     if !attrs_str.is_empty() {
         for attr in attrs_str.split_whitespace() {
             if let Some((key, value)) = attr.split_once('=') {
-                match key {
-                    "status" => metadata.status = marq::ReqStatus::parse(value),
-                    "level" => metadata.level = marq::ReqLevel::parse(value),
-                    "since" => metadata.since = Some(value.to_string()),
-                    "until" => metadata.until = Some(value.to_string()),
-                    "tags" => {
-                        metadata.tags =
-                            value.split(',').map(|s| s.trim().to_string()).collect()
-                    }
-                    _ => {}
-                }
+                apply_metadata_attr(&mut metadata, key, value);
             }
         }
     }
     Some((req_id, metadata))
+}
+
+/// Apply a single `key=value` requirement-metadata attribute (shared by both
+/// the classic `r[...] key=value` marker syntax and native
+/// `[role="requirement", key="value"]` blocks).
+fn apply_metadata_attr(metadata: &mut ReqMetadata, key: &str, value: &str) {
+    match key {
+        "status" => metadata.status = marq::ReqStatus::parse(value),
+        "level" => metadata.level = marq::ReqLevel::parse(value),
+        "since" => metadata.since = Some(value.to_string()),
+        "until" => metadata.until = Some(value.to_string()),
+        "tags" => {
+            metadata.tags = value
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        }
+        _ => {}
+    }
 }
 
 fn html_escape(s: &str) -> String {
