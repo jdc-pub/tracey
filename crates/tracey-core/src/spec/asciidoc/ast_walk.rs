@@ -325,15 +325,9 @@ fn extract_req_block<'arena>(
     result.elements.push(DocElement::Req(req.clone()));
     result.reqs.push(req);
 
-    // Still walk any nested blocks (e.g. admonitions, nested lists) so their
-    // inline code spans are collected for hover/search.
-    if let BlockContent::Compound(inner_blocks) = &block.content {
-        for inner in inner_blocks {
-            collect_inline_spans_recursive(inner, &mut result.inline_code_spans);
-        }
-    } else if let BlockContent::Simple(inlines) = &block.content {
-        collect_spans_from_inlines(inlines, &mut result.inline_code_spans);
-    }
+    // Still walk the block's own content (e.g. admonitions, nested lists) so
+    // its inline code spans are collected for hover/search.
+    collect_inline_spans_recursive(block, &mut result.inline_code_spans);
 
     Ok(true)
 }
