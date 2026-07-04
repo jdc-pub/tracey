@@ -261,6 +261,17 @@ fn test_roles_extract_marker_prefix_explicit() {
 }
 
 #[test]
+fn test_roles_extract_marker_prefix_empty_defaults_to_r() {
+    let content = r#"[role="requirement", id="auth.login", prefix=""]"#;
+    let span = SourceSpan {
+        offset: 0,
+        length: content.len(),
+    };
+    let prefix = extract_marker_prefix(SpecFormat::AsciiDoc, content, span).expect("prefix");
+    assert_eq!(prefix, "r", "an explicit empty prefix should fall back to the default, not propagate as an empty string");
+}
+
+#[test]
 fn test_roles_id_range_in_marker() {
     let marker = r#"[role="requirement", id="auth.login"]"#;
     let range = id_range_in_marker(SpecFormat::AsciiDoc, marker).expect("id_range");
