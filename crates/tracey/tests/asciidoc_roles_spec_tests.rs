@@ -49,6 +49,23 @@ Some deprecated behavior text.
 }
 
 #[tokio::test]
+async fn test_roles_level_since_until() {
+    let src = r#"= Title
+
+[role="requirement", id="api.compat", level="should", since="1.2.0", until="2.0.0"]
+--
+Clients SHOULD tolerate additional unknown fields.
+--
+"#;
+    let doc = parse_spec(SpecFormat::AsciiDoc, src).await.expect("parse");
+    assert_eq!(doc.reqs.len(), 1);
+    let req = &doc.reqs[0];
+    assert_eq!(req.metadata.level, Some(marq::ReqLevel::Should));
+    assert_eq!(req.metadata.since, Some("1.2.0".to_string()));
+    assert_eq!(req.metadata.until, Some("2.0.0".to_string()));
+}
+
+#[tokio::test]
 async fn test_roles_rich_content_passthrough() {
     let src = r#"= Title
 

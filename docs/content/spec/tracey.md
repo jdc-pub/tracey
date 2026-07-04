@@ -123,7 +123,7 @@ Requirements are defined in markdown specification documents using the syntax `P
 
 ## Requirement Definitions in AsciiDoc
 
-Requirements MAY be defined in AsciiDoc specification documents using either the classic leading-marker syntax shared with markdown, or a native AsciiDoc `[role="requirement"]` block. The requirement definitions for this behavior are themselves authored in AsciiDoc, dogfooding both syntaxes — see [`asciidoc-roles.adoc`](asciidoc-roles.adoc).
+Requirements MAY be defined in AsciiDoc specification documents using either the classic leading-marker syntax shared with markdown, or a native AsciiDoc `[role="requirement"]` block.
 
 ## Requirement References in Source Code
 
