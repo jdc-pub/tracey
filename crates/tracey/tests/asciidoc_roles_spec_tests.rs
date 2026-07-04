@@ -66,6 +66,24 @@ Clients SHOULD tolerate additional unknown fields.
 }
 
 #[tokio::test]
+async fn test_roles_empty_tags_attribute_yields_no_tags() {
+    let src = r#"= Title
+
+[role="requirement", id="auth.empty", tags=""]
+--
+Body.
+--
+"#;
+    let doc = parse_spec(SpecFormat::AsciiDoc, src).await.expect("parse");
+    assert_eq!(doc.reqs.len(), 1);
+    assert!(
+        doc.reqs[0].metadata.tags.is_empty(),
+        "an empty tags attribute should yield no tags, got {:?}",
+        doc.reqs[0].metadata.tags
+    );
+}
+
+#[tokio::test]
 async fn test_roles_rich_content_passthrough() {
     let src = r#"= Title
 
