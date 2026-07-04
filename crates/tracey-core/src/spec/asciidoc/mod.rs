@@ -90,6 +90,7 @@ impl SpecBackend for Asciidoc {
             return Some(
                 find_named_attr(marker, "prefix")
                     .map(|(s, e)| marker[s..e].to_string())
+                    .filter(|p| !p.is_empty())
                     .unwrap_or_else(|| "r".to_string()),
             );
         }
