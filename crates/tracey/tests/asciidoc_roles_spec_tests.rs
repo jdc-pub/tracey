@@ -120,6 +120,33 @@ not a real req
 }
 
 #[tokio::test]
+async fn test_roles_html_splice_ignores_id_text_in_earlier_listing_block() {
+    let src = r#"= Title
+
+Example of the syntax:
+
+----
+[role="requirement", id="auth.login"]
+--
+example only, not real
+--
+----
+
+[role="requirement", id="auth.login"]
+--
+Real login body.
+--
+"#;
+    let doc = parse_spec(SpecFormat::AsciiDoc, src).await.expect("parse");
+    assert_eq!(doc.reqs.len(), 1, "only the real block should be extracted as a requirement");
+    assert!(
+        doc.reqs[0].html.contains("Real login body"),
+        "requirement body should come from the real block, not the listing example, got: {}",
+        doc.reqs[0].html
+    );
+}
+
+#[tokio::test]
 async fn test_roles_duplicate_id_errors() {
     let src = r#"= Title
 
