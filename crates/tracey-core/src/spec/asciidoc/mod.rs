@@ -84,7 +84,7 @@ impl SpecBackend for Asciidoc {
         let start = span.offset;
         let end = start.checked_add(span.length)?;
         let marker = content.get(start..end)?;
-        if marker.starts_with('[') {
+        if is_role_block_marker(marker) {
             // Attribute-list marker from a role-marked block: the requirement
             // prefix comes from an optional `prefix="..."` attribute.
             return Some(
@@ -103,7 +103,7 @@ impl SpecBackend for Asciidoc {
     }
 
     fn id_range_in_marker(&self, marker: &str) -> eyre::Result<Range<usize>> {
-        if marker.starts_with('[') {
+        if is_role_block_marker(marker) {
             return find_named_attr(marker, "id")
                 .map(|(s, e)| s..e)
                 .ok_or_else(|| eyre::eyre!("malformed asciidoc requirement marker: {}", marker));
@@ -250,7 +250,7 @@ fn post_process_html(
         let marker_text = source
             .get(req.marker_span.offset..req.marker_span.offset + req.marker_span.length)
             .unwrap_or("");
-        if marker_text.starts_with('[') {
+        if is_role_block_marker(marker_text) {
             // Role-marked open block: asciidork rendered it as its own div, so
             // locate that div by its authored id and splice the req-container
             // wrapper around it instead of re-rendering the body by hand.
@@ -322,6 +322,12 @@ fn replace_req_paragraph(
     result.push_str(&replacement);
     result.push_str(&html[div_end..]);
     result
+}
+
+/// Whether a requirement's marker text is a native `[role="requirement", ...]`
+/// attribute-list block, as opposed to a classic leading `prefix[id]` marker.
+fn is_role_block_marker(marker: &str) -> bool {
+    marker.starts_with('[')
 }
 
 /// Find a `key="value"` (or `key=value`) attribute in a marker string that may
