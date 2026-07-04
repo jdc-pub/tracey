@@ -333,15 +333,17 @@ fn replace_req_paragraph(
 fn find_named_attr(marker: &str, key: &str) -> Option<(usize, usize)> {
     let list_start = marker.find('[')? + 1;
     let bytes = marker.as_bytes();
-    let mut in_quotes = false;
+    let mut quote: Option<u8> = None;
     let mut seg_start = list_start;
     let mut pos = list_start;
     while pos < bytes.len() {
         let b = bytes[pos];
-        if in_quotes {
-            in_quotes = b != b'"';
-        } else if b == b'"' {
-            in_quotes = true;
+        if let Some(q) = quote {
+            if b == q {
+                quote = None;
+            }
+        } else if b == b'"' || b == b'\'' {
+            quote = Some(b);
         } else if b == b',' || b == b']' {
             if let Some(range) = named_attr_value_in(marker, seg_start, pos, key) {
                 return Some(range);
@@ -369,13 +371,13 @@ fn named_attr_value_in(
     let key_start = seg_start + (seg.len() - trimmed.len());
     let rest = trimmed.strip_prefix(key)?.strip_prefix('=')?;
     let value_start = key_start + key.len() + 1;
-    match rest.strip_prefix('"') {
-        Some(quoted) => {
-            let len = quoted.find('"')?;
-            Some((value_start + 1, value_start + 1 + len))
+    for quote in ['"', '\''] {
+        if let Some(quoted) = rest.strip_prefix(quote) {
+            let len = quoted.find(quote)?;
+            return Some((value_start + 1, value_start + 1 + len));
         }
-        None => Some((value_start, value_start + rest.trim_end().len())),
     }
+    Some((value_start, value_start + rest.trim_end().len()))
 }
 
 /// Locate a `<div id="{id}" ...>...</div>` element in rendered HTML by its
