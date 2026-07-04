@@ -247,7 +247,40 @@ fn extract_req_block<'arena>(
 ) -> eyre::Result<bool> {
     let attrs = &block.meta.attrs;
 
-    let Some(req_id) = attrs.id().and_then(|s| marq::parse_rule_id(s.as_ref())) else {
+    let Some(id_str) = attrs.id() else {
+        return Ok(false);
+    };
+
+    // Marker span: the source range covering every stacked `[...]`
+    // attribute-list line on this block (brackets included), not just the one
+    // carrying `id=` — `role`, `prefix`, and `id` can each live on their own
+    // line, and `extract_marker_prefix`/`id_range_in_marker` re-scan this
+    // whole span, so it must include all of them for `rewrite_marker` to
+    // splice a bumped id in place, byte-for-byte.
+    let mut attrs_iter = attrs.iter();
+    let first_loc = attrs_iter.next().map(|a| a.loc).unwrap_or(block.meta.start_loc);
+    let (loc_start, loc_end) = attrs.iter().fold((first_loc.start, first_loc.end), |(s, e), a| {
+        (s.min(a.loc.start), e.max(a.loc.end))
+    });
+    let marker_span = SourceSpan {
+        offset: loc_start as usize,
+        length: (loc_end - loc_start) as usize,
+    };
+
+    // Only accept ids written with the named `id="..."` attribute form, not
+    // AsciiDoc's shorthand `#id` block-anchor syntax: `id_range_in_marker`
+    // (used by `tracey bump`) only knows how to re-locate the named form, so
+    // a shorthand-only id would extract fine here but make bump fail on a
+    // requirement the tool itself just recognized. Degrade gracefully instead
+    // — same as a block with no id at all.
+    let marker_text = source
+        .get(marker_span.offset..marker_span.offset + marker_span.length)
+        .unwrap_or("");
+    if super::find_named_attr(marker_text, "id").map(|(s, e)| &marker_text[s..e]) != Some(id_str.as_ref()) {
+        return Ok(false);
+    }
+
+    let Some(req_id) = marq::parse_rule_id(id_str.as_ref()) else {
         return Ok(false);
     };
 
@@ -272,22 +305,6 @@ fn extract_req_block<'arena>(
     if let Some(v) = attrs.named("tags") {
         metadata.tags = v.split(',').map(|s| s.trim().to_string()).collect();
     }
-
-    // Marker span: the source range covering every stacked `[...]`
-    // attribute-list line on this block (brackets included), not just the one
-    // carrying `id=` — `role`, `prefix`, and `id` can each live on their own
-    // line, and `extract_marker_prefix`/`id_range_in_marker` re-scan this
-    // whole span, so it must include all of them for `rewrite_marker` to
-    // splice a bumped id in place, byte-for-byte.
-    let mut attrs_iter = attrs.iter();
-    let first_loc = attrs_iter.next().map(|a| a.loc).unwrap_or(block.meta.start_loc);
-    let (loc_start, loc_end) = attrs.iter().fold((first_loc.start, first_loc.end), |(s, e), a| {
-        (s.min(a.loc.start), e.max(a.loc.end))
-    });
-    let marker_span = SourceSpan {
-        offset: loc_start as usize,
-        length: (loc_end - loc_start) as usize,
-    };
 
     let (span_start, span_end) =
         content_span(&block.content).unwrap_or((loc_end as usize, loc_end as usize));
