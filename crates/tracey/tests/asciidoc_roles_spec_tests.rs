@@ -147,6 +147,24 @@ Real login body.
 }
 
 #[tokio::test]
+async fn test_roles_prefix_visible_across_stacked_attribute_lines() {
+    let src = r#"= Title
+
+[role="requirement", prefix="h2"]
+[id="error.codes"]
+--
+Some behavior text.
+--
+"#;
+    let doc = parse_spec(SpecFormat::AsciiDoc, src).await.expect("parse");
+    assert_eq!(doc.reqs.len(), 1);
+    let req = &doc.reqs[0];
+    let prefix = extract_marker_prefix(SpecFormat::AsciiDoc, src, req.marker_span)
+        .expect("prefix should resolve");
+    assert_eq!(prefix, "h2", "prefix on a sibling attribute-list line must still be found");
+}
+
+#[tokio::test]
 async fn test_roles_duplicate_id_errors() {
     let src = r#"= Title
 
