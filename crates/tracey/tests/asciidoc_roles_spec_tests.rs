@@ -250,6 +250,13 @@ fn test_roles_id_range_in_marker() {
 }
 
 #[test]
+fn test_roles_id_range_in_marker_single_quoted() {
+    let marker = r#"[role='requirement', id='auth.login']"#;
+    let range = id_range_in_marker(SpecFormat::AsciiDoc, marker).expect("id_range");
+    assert_eq!(&marker[range], "auth.login");
+}
+
+#[test]
 fn test_roles_id_range_ignores_id_inside_quoted_value() {
     let marker = r#"[role="requirement", tags="foo, id=5", id="auth.login"]"#;
     let range = id_range_in_marker(SpecFormat::AsciiDoc, marker).expect("id_range");
