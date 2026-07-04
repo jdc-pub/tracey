@@ -323,39 +323,49 @@ fn replace_req_paragraph(
     result
 }
 
-/// Find a `key="value"` (or `key=value`) attribute in a `[...]` attribute-list
-/// marker string. Returns the byte range of the value, quotes excluded.
+/// Find a `key="value"` (or `key=value`) attribute in a marker string that may
+/// contain one or more stacked `[...]` attribute-list lines (role, prefix, and
+/// id can each live on their own line). Returns the byte range of the value,
+/// quotes excluded.
 ///
-/// Splits the list on top-level commas (quote-aware, so a quoted value like
-/// `tags="foo, id=5"` cannot produce a false `id` match) and requires each
-/// candidate segment to start with exactly `key=`, so `key` never matches
-/// inside a longer attribute name.
+/// Within each bracket group, splits on top-level commas (quote-aware, so a
+/// quoted value like `tags="foo, id=5"` cannot produce a false `id` match) and
+/// requires each candidate segment to start with exactly `key=`, so `key`
+/// never matches inside a longer attribute name. If `key` isn't found in one
+/// group, the search continues into the next `[...]` group rather than
+/// stopping at the first `]`.
 fn find_named_attr(marker: &str, key: &str) -> Option<(usize, usize)> {
-    let list_start = marker.find('[')? + 1;
     let bytes = marker.as_bytes();
-    let mut quote: Option<u8> = None;
-    let mut seg_start = list_start;
-    let mut pos = list_start;
-    while pos < bytes.len() {
-        let b = bytes[pos];
-        if let Some(q) = quote {
-            if b == q {
-                quote = None;
+    let mut group_from = 0usize;
+    loop {
+        let list_start = group_from + marker[group_from..].find('[')? + 1;
+        let mut quote: Option<u8> = None;
+        let mut seg_start = list_start;
+        let mut pos = list_start;
+        while pos < bytes.len() {
+            let b = bytes[pos];
+            if let Some(q) = quote {
+                if b == q {
+                    quote = None;
+                }
+            } else if b == b'"' || b == b'\'' {
+                quote = Some(b);
+            } else if b == b',' || b == b']' {
+                if let Some(range) = named_attr_value_in(marker, seg_start, pos, key) {
+                    return Some(range);
+                }
+                if b == b']' {
+                    break;
+                }
+                seg_start = pos + 1;
             }
-        } else if b == b'"' || b == b'\'' {
-            quote = Some(b);
-        } else if b == b',' || b == b']' {
-            if let Some(range) = named_attr_value_in(marker, seg_start, pos, key) {
-                return Some(range);
-            }
-            if b == b']' {
-                return None;
-            }
-            seg_start = pos + 1;
+            pos += 1;
         }
-        pos += 1;
+        if pos >= bytes.len() {
+            return named_attr_value_in(marker, seg_start, bytes.len(), key);
+        }
+        group_from = pos + 1;
     }
-    named_attr_value_in(marker, seg_start, bytes.len(), key)
 }
 
 /// Check whether `marker[seg_start..seg_end]` is a `key=value` attribute;

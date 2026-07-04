@@ -273,21 +273,24 @@ fn extract_req_block<'arena>(
         metadata.tags = v.split(',').map(|s| s.trim().to_string()).collect();
     }
 
-    // Marker span: the source range of whichever `[...]` attribute-list line
-    // carries the `id=` attribute (brackets included), so `rewrite_marker` can
+    // Marker span: the source range covering every stacked `[...]`
+    // attribute-list line on this block (brackets included), not just the one
+    // carrying `id=` — `role`, `prefix`, and `id` can each live on their own
+    // line, and `extract_marker_prefix`/`id_range_in_marker` re-scan this
+    // whole span, so it must include all of them for `rewrite_marker` to
     // splice a bumped id in place, byte-for-byte.
-    let marker_loc = attrs
-        .iter()
-        .find(|a| a.id.is_some())
-        .map(|a| a.loc)
-        .unwrap_or(block.meta.start_loc);
+    let mut attrs_iter = attrs.iter();
+    let first_loc = attrs_iter.next().map(|a| a.loc).unwrap_or(block.meta.start_loc);
+    let (loc_start, loc_end) = attrs.iter().fold((first_loc.start, first_loc.end), |(s, e), a| {
+        (s.min(a.loc.start), e.max(a.loc.end))
+    });
     let marker_span = SourceSpan {
-        offset: marker_loc.start as usize,
-        length: (marker_loc.end - marker_loc.start) as usize,
+        offset: loc_start as usize,
+        length: (loc_end - loc_start) as usize,
     };
 
-    let (span_start, span_end) = content_span(&block.content)
-        .unwrap_or((marker_loc.end as usize, marker_loc.end as usize));
+    let (span_start, span_end) =
+        content_span(&block.content).unwrap_or((loc_end as usize, loc_end as usize));
     let line = byte_offset_to_line(source, span_start);
     let anchor = req_anchor_id(&req_id.to_string());
 
