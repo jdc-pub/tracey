@@ -117,10 +117,7 @@ fn walk_block<'arena>(
     result: &mut WalkResult,
     seen_bases: &mut HashSet<String>,
 ) -> eyre::Result<()> {
-    if block.context == BlockContext::Open
-        && block.meta.attrs.has_role("requirement")
-        && extract_req_block(block, source, result, seen_bases)?
-    {
+    if block.meta.attrs.has_role("requirement") && extract_req_block(block, source, result, seen_bases)? {
         return Ok(());
     }
 
