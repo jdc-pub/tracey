@@ -196,7 +196,7 @@ fn parse_sync(
         &mut walk.reqs,
         &walk.section_id_map,
         req_renderer,
-    );
+    )?;
 
     Ok(marq::Document {
         raw_metadata: None,
@@ -241,8 +241,9 @@ fn post_process_html(
     reqs: &mut [ReqDefinition],
     section_id_map: &[(String, String)],
     req_renderer: &dyn Fn(&ReqDefinition) -> (String, String),
-) -> String {
+) -> eyre::Result<String> {
     let mut html = content_html.to_string();
+    let mut cursor = 0usize;
 
     for req in reqs.iter_mut() {
         let marker_text = source
@@ -252,13 +253,21 @@ fn post_process_html(
             // Role-marked open block: asciidork rendered it as its own div, so
             // locate that div by its authored id and splice the req-container
             // wrapper around it instead of re-rendering the body by hand.
+            // Requirements appear in document order, so the search only ever
+            // moves forward, and any earlier stray text (e.g. an example
+            // block showing the syntax) cannot be picked up in place of the
+            // real block that comes after it.
             let doc_id = req.id.to_string();
-            if let Some((range, inner)) = extract_div_by_id(&html, &doc_id) {
-                req.html = inner.clone();
-                let (open_html, close_html) = req_renderer(req);
-                let replacement = format!("{open_html}{inner}{close_html}");
-                html.replace_range(range, &replacement);
-            }
+            let (range, inner) = extract_div_by_id(&html, &doc_id, cursor).ok_or_else(|| {
+                eyre::eyre!(
+                    "could not locate rendered <div id=\"{doc_id}\"> for requirement block"
+                )
+            })?;
+            req.html = inner.clone();
+            let (open_html, close_html) = req_renderer(req);
+            let replacement = format!("{open_html}{inner}{close_html}");
+            cursor = range.start + replacement.len();
+            html.replace_range(range, &replacement);
         } else if !marker_text.is_empty() {
             html = replace_req_paragraph(&html, req, marker_text, req_renderer);
         }
@@ -274,7 +283,7 @@ fn post_process_html(
         html = html.replace(&from_href, &to_href);
     }
 
-    html
+    Ok(html)
 }
 
 fn replace_req_paragraph(
@@ -374,13 +383,27 @@ fn named_attr_value_in(
 /// spans the whole element even when its content contains further divs
 /// (admonitions, nested blocks, etc).
 ///
+/// Searches starting at `from` (callers pass a forward-only cursor, since
+/// requirements are visited in document order). A textual match for
+/// ` id="..."` is only accepted when it falls inside the *opening tag* of the
+/// nearest preceding `<div`, not merely somewhere in that div's body — e.g. an
+/// example block whose escaped text happens to spell out the same attribute
+/// is body content, not a real id, so the search keeps going past it.
+///
 /// Returns the byte range of the whole element and the inner HTML (between
 /// the opening tag's `>` and the matching `</div>`).
-fn extract_div_by_id(html: &str, id: &str) -> Option<(Range<usize>, String)> {
+fn extract_div_by_id(html: &str, id: &str, from: usize) -> Option<(Range<usize>, String)> {
     let marker = format!(r#" id="{}""#, id);
-    let attr_pos = html.find(&marker)?;
-    let tag_start = html[..attr_pos].rfind("<div")?;
-    let tag_close = html[tag_start..].find('>')? + tag_start + 1;
+    let mut search_from = from;
+    let (tag_start, tag_close) = loop {
+        let attr_pos = search_from + html[search_from..].find(&marker)?;
+        let tag_start = html[..attr_pos].rfind("<div")?;
+        let tag_close = html[tag_start..].find('>')? + tag_start + 1;
+        if attr_pos < tag_close {
+            break (tag_start, tag_close);
+        }
+        search_from = attr_pos + marker.len();
+    };
 
     let mut depth = 1usize;
     let mut pos = tag_close;
