@@ -183,6 +183,27 @@ Second.
 }
 
 #[tokio::test]
+async fn test_roles_paragraph_block_extracted() {
+    let src = r#"= Title
+
+[role="requirement", id="auth.mfa"]
+Users MUST use MFA.
+"#;
+    let doc = parse_spec(SpecFormat::AsciiDoc, src).await.expect("parse");
+    assert_eq!(
+        doc.reqs.len(),
+        1,
+        "role=\"requirement\" on a plain paragraph (no open-block delimiters) should still be extracted"
+    );
+    assert_eq!(doc.reqs[0].id.to_string(), "auth.mfa");
+    assert!(
+        doc.reqs[0].html.contains("MFA"),
+        "requirement html should be spliced in, got: {}",
+        doc.reqs[0].html
+    );
+}
+
+#[tokio::test]
 async fn test_roles_non_requirement_open_block_ignored() {
     let src = r#"= Title
 
