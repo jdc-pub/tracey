@@ -462,13 +462,7 @@ fn apply_metadata_attr(metadata: &mut ReqMetadata, key: &str, value: &str) {
         "level" => metadata.level = marq::ReqLevel::parse(value),
         "since" => metadata.since = Some(value.to_string()),
         "until" => metadata.until = Some(value.to_string()),
-        "tags" => {
-            metadata.tags = value
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect()
-        }
+        "tags" => metadata.tags = value.split(',').map(|s| s.trim().to_string()).collect(),
         _ => {}
     }
 }
