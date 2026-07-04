@@ -218,6 +218,30 @@ This one is fine.
 }
 
 #[tokio::test]
+async fn test_roles_shorthand_id_degrades_gracefully() {
+    let src = r#"= Title
+
+[#shorthand.req, role="requirement"]
+--
+Written using AsciiDoc's shorthand id syntax.
+--
+
+[role="requirement", id="valid.req"]
+--
+This one is fine.
+--
+"#;
+    let doc = parse_spec(SpecFormat::AsciiDoc, src).await.expect("parse must not fail");
+    assert_eq!(
+        doc.reqs.len(),
+        1,
+        "a role block whose id only appears in shorthand form (not bumpable via id_range_in_marker) \
+         must degrade gracefully like a missing-id block, not extract successfully"
+    );
+    assert_eq!(doc.reqs[0].id.to_string(), "valid.req");
+}
+
+#[tokio::test]
 async fn test_roles_coexist_with_leading_markers() {
     let src = r#"= Title
 
