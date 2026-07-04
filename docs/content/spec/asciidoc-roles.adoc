@@ -1,0 +1,36 @@
+= AsciiDoc Requirement Definitions
+
+Dogfooding: this spec is authored in AsciiDoc using both requirement syntaxes the AsciiDoc backend supports.
+
+== Syntax
+
+ar[asciidoc.syntax.marker] A requirement definition MAY be written as a leading `PREFIX[REQ]` token on a standalone paragraph, exactly as in markdown.
+
+[role="requirement", id="asciidoc.syntax.role-block", prefix="ar"]
+--
+A requirement definition MAY be written as a native AsciiDoc open block carrying `role="requirement"` and `id="REQ"` in its attribute list. The block's body becomes the requirement text, reusing asciidork's own rendering of that body rather than re-rendering it by hand.
+--
+
+[role="requirement", id="asciidoc.syntax.metadata", prefix="ar", tags="metadata"]
+--
+The attribute list of a role block MAY carry `status`, `level`, `since`, `until`, `tags`, and `prefix` as named attributes. `prefix` overrides the inferred marker prefix for that requirement and defaults to `r` when absent.
+--
+
+[role="requirement", id="asciidoc.syntax.unparsable-id", prefix="ar"]
+--
+A `[role="requirement"]` block with no parseable `id=` attribute MUST degrade to a plain block rather than a requirement definition, mirroring how an unparsable `r[...]` marker degrades to a plain paragraph.
+--
+
+ar[asciidoc.syntax.mixed] Both the leading-marker syntax and native role blocks MAY be used within the same AsciiDoc file — this file uses both.
+
+== Masking
+
+[role="requirement", id="asciidoc.masking.listing", prefix="ar"]
+--
+A `[role="requirement"]` block or `r[...]` marker written inside a listing block (delimited by `----`) MUST NOT be treated as a requirement definition.
+--
+
+[role="requirement", id="asciidoc.masking.comment", prefix="ar"]
+--
+A `[role="requirement"]` block or `r[...]` marker written inside a block comment (delimited by `////`) MUST NOT be treated as a requirement definition.
+--

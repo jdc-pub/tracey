@@ -121,6 +121,10 @@ Requirements are defined in markdown specification documents using the syntax `P
 > OK - different spec, different prefix, no conflict.
 > ```
 
+## Requirement Definitions in AsciiDoc
+
+Requirements MAY be defined in AsciiDoc specification documents using either the classic leading-marker syntax shared with markdown, or a native AsciiDoc `[role="requirement"]` block. The requirement definitions for this behavior are themselves authored in AsciiDoc, dogfooding both syntaxes — see [`asciidoc-roles.adoc`](asciidoc-roles.adoc).
+
 ## Requirement References in Source Code
 
 Requirement references are extracted from source code comments using the syntax `PREFIX[VERB REQ]` where PREFIX matches a spec marker inferred from requirement definitions.

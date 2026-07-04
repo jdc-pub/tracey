@@ -25,4 +25,17 @@ specs (
             }
         )
     }
+    {
+        name tracey-asciidoc-roles
+        source_url https://github.com/bearcove/tracey
+        include (docs/content/spec/asciidoc-roles.adoc)
+        impls (
+            {
+                name main
+                include (crates/tracey-core/src/spec/asciidoc/**/*.rs)
+                exclude (target/**)
+                test_include ()
+            }
+        )
+    }
 )
