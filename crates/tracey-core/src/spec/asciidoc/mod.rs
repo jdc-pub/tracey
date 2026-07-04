@@ -20,7 +20,7 @@ use std::ops::Range;
 use asciidork_core::JobSettings;
 use asciidork_parser::prelude::*;
 use bumpalo::Bump;
-use marq::{ReqDefinition, SourceSpan};
+use marq::{DocElement, ReqDefinition, SourceSpan};
 
 use super::{
     BadgeFn, NoConfig, REQ_CONTAINER_CLOSE, RenderInput, RenderOutput, RenderedSection,
@@ -195,6 +195,7 @@ fn parse_sync(
         content_html,
         content,
         &mut walk.reqs,
+        &mut walk.elements,
         &walk.section_id_map,
         req_renderer,
     )?;
@@ -240,6 +241,7 @@ fn post_process_html(
     content_html: &str,
     source: &str,
     reqs: &mut [ReqDefinition],
+    elements: &mut [DocElement],
     section_id_map: &[(String, String)],
     req_renderer: &dyn Fn(&ReqDefinition) -> (String, String),
 ) -> eyre::Result<String> {
@@ -265,6 +267,15 @@ fn post_process_html(
                 )
             })?;
             req.html = inner.clone();
+            // `elements` was populated at walk time, before this HTML render
+            // pass existed, so the `DocElement::Req` clone still has the
+            // walk-time (empty) html — bring it in sync now that we have it.
+            if let Some(DocElement::Req(el)) = elements
+                .iter_mut()
+                .find(|e| matches!(e, DocElement::Req(r) if r.id == req.id))
+            {
+                el.html = req.html.clone();
+            }
             let (open_html, close_html) = req_renderer(req);
             let replacement = format!("{open_html}{inner}{close_html}");
             cursor = range.start + replacement.len();
